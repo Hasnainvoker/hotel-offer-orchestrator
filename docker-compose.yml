@@ -1,0 +1,75 @@
+name: hotel-offer-orchestrator
+
+x-app-env: &app-env
+  LOG_LEVEL: info
+  REDIS_URL: redis://redis:6379
+  CACHE_TTL_SECONDS: "600"
+  TEMPORAL_ADDRESS: temporal:7233
+  TEMPORAL_NAMESPACE: default
+  TEMPORAL_TASK_QUEUE: hotel-offers
+  # Mock suppliers are served by the api container.
+  SUPPLIER_A_URL: http://api:3000/supplierA/hotels
+  SUPPLIER_B_URL: http://api:3000/supplierB/hotels
+  SUPPLIER_TIMEOUT_MS: "3000"
+
+services:
+  redis:
+    image: redis:8.2-alpine
+    ports:
+      - "127.0.0.1:6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # Single-binary Temporal dev server (in-memory persistence) with the Web UI on :8233.
+  temporal:
+    image: temporalio/temporal:1.9.1
+    command: ["server", "start-dev", "--ip", "0.0.0.0", "--namespace", "default"]
+    ports:
+      - "127.0.0.1:7233:7233"
+      - "127.0.0.1:8233:8233"
+    healthcheck:
+      test: ["CMD", "temporal", "operator", "cluster", "health", "--address", "localhost:7233"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
+
+  api:
+    build: .
+    image: hotel-offer-orchestrator:latest
+    command: ["node", "dist/server.js"]
+    environment:
+      <<: *app-env
+      PORT: "3000"
+      # Enables PUT /admin/suppliers/:id for the "supplier down" demo. Never enable in production.
+      ENABLE_ADMIN_ROUTES: "true"
+    ports:
+      - "127.0.0.1:3000:3000"
+    depends_on:
+      redis:
+        condition: service_healthy
+      temporal:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3000/health/live').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  worker:
+    image: hotel-offer-orchestrator:latest
+    command: ["node", "dist/temporal/worker.js"]
+    environment:
+      <<: *app-env
+    depends_on:
+      api:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      temporal:
+        condition: service_healthy
+    restart: unless-stopped
